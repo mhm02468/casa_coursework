@@ -1,0 +1,644 @@
+---
+title: "Practice Exam Q1"
+author: "Matthew Martignoni"
+- |
+    | Student number: 22236630
+date: "`r format(Sys.time(), '%X, %d %B, %Y')`"
+output: html_document
+---
+# Originality declaration  
+
+I, [**Matthew Martignoni**], confirm that the work presented in this assessment is my own. Where information has been derived from other sources, I confirm that this has been indicated in the work.
+
+date: `r format(Sys.time(), '%15 %12, %2022')`
+
+# Initial Scope
+
+**Context of NYC Evictions:**
+
+"The Tenant Safe Harbor Act, Chapter 127 of 2020, protects tenants from eviction for failing to pay their rent that came due during the covered period from March 7, 2020 through January 15, 2022,  if they suffered a financial hardship due to COVID-19." (https://hcr.ny.gov/covid-19-eviction-protections-tenants#:~:text=The%20Tenant%20Safe%20Harbor%20Act,hardship%20due%20to%20COVID%2D19.)
+
+**Quick look at data:**This exam focuses on two primary datasets: eviction data from the city government and spatial data of New York "community districts." Upon examination of the data, there are a few fields that are of particular interest that I will select/filter when I initially "wrangle" the data. First, the date field. It will allow us to focus on 2020, as the question asks, and maybe go further to do comparative analyses of several dates. However, some of this data are character data when we want them to be numbers. I can either use str_detect() or as.Data() to address this. The eviction data also has longitude and latitude for each individual eviction, which could be used to turn the non-spatial data into spatial data using st_as_sf(). There is also a field called "Eviction/Legal Posession" which might be useful moving forward as we could compare the two. This also might be necessary to select for *just* evictions. Upon googling, though, it seems that both are "functionally" evictions. In legal posession, the landlord keeps one's belongings whereas the city claims them if you're evicted. We can also include the postcode because that could also serve as a spatial marker, if we find a new shapefile of zipcodes with geometry and then we could do a left/spatial join. I will also include council district because it could be another useful way to visualise the data and it could make it useful for consituents to call on their specific elected officials to address evictions in their district. For the field "residential/commerical,"  I'll just include residential evictions because that will allow for a more focused analysis. There also seem to be NA values in the longitude/latitude columns (and others) that I'll have to remove. Further, the council districts I am including (because they're better suited for a left_join with the eviction data) currently have the district  number as a character. I'll change that using as.numeric(). After I've selected those columns and cleaned the data (i.e., using clean_names(), as.Date(), drop.na()), I'll select a subset of data that is just 2020 so I can come back to the main *clean* dataset later if I want to do comparative analysis. I will also use mutate() to create more columns in the eviction dataset for the year and month if I want to later use groupby() to look at total number of evictions per year/month. Then, I'll use that to select other years/months for comparison. After wrangling the data, I'll subset it with the points so I exclude points that might not quite fall within the geojson. In generally, I will only filter for date at first to get a greater look at the whole dataset. Then, I'll come back if I want more specific  information.
+
+Also, in QGIS, the crs appears to be WGS84. The EPSG code *in metres* is 6538 for NYC. I'll transform it right away because it might cause issues later if other spatial data is in a different crs. I can also check the crs of the datasets by putting them in the terminal.
+
+**First reactions to the question as well that might guide my analysis:** As the question asks, I will zoom into the 2020 period but I will compare it to the 2019 data. Importantly, 2020 marks the beginning of the COVID pandemic when NYC put a moratorium on evictions and there were federal supports for people. Accordingly, this data might not be entirely representative of the whole landscape of evictions in the city. There are many general pieces of information we can get from eviction data more generally. We can track evictions with historical events, overlay it with other data like demographics and run regressions. It would allow us to discuss the efficacy of regulating evictions. 
+
+**adjustments to data:**I am also going to add in city council districts so I can make a count map. This could help constituents highlight where more evictions take place and bring it directly to their elected official. I will also focus on residential evictions because it will also allowed for a more focused discussion of housing as an issue.
+
+**research question:** Are residential evictions that took place in 2020 clustering in New York City? If so, in which parts of the city and to what degree? How does this compare to 2019?
+
+Null Hypothesis: There is no clustering of evictions in either year.
+
+Alternative Hypothesis: Evictions cluster in specific neighbourhoods and the degree of that clustering differs significantly between 2019 and 2020.
+
+# Data Loading, Wrangling and Pre-processing
+
+```{r loading libraries and wrangling data}
+library(spatstat)
+library(here)
+library(sp)
+library(rgeos)
+library(maptools)
+library(tmap)
+library(sf)
+library(geojson)
+library(geojsonio)
+library(tmaptools)
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(tmaptools)
+library(leafpop)
+library(leaflet)
+library(readr)
+library(janitor)
+library(dplyr)
+library(grid)
+library(OpenStreetMap)
+library(raster)
+library(fpc)
+library(dbscan)
+library(ggplot2)
+library(RSQLite)
+library(rgdal)
+library(terra)
+library(RColorBrewer)
+library(spdep)
+library(lubridate)
+library(zoo)
+library(viridis)
+library(ggplot2)
+library(dplyr)
+library(plotly)
+library(hrbrthemes)
+library(maptools)
+library(cartogram)
+
+
+
+#Reading in data and adjusting the crs
+evictions <- read_csv(here::here("ny_data", "Evictions.csv"), locale = locale(encoding = "latin1"), na = c("NA", "Null", "-"))
+
+ny_districts <- st_read(here::here("ny_data/Community Districts", "geo_export_85a1ae35-ce2e-498a-8c23-d2af2034f1d4.shp")) %>% 
+  st_transform(6538)
+
+ny_citycouncil <- st_read(here::here("ny_data/", "City Council Districts.geojson")) %>% 
+  st_transform(6538)
+
+ny_citycouncil$coun_dist <- as.numeric(ny_citycouncil$coun_dist)
+
+#Check the class of every field of the eviction data
+data_summary_class <- evictions %>% 
+  dplyr::summarise_all(class) %>%
+  tidyr::pivot_longer(everything(), names_to="All_variables", values_to="Variable_class")
+
+#Check the na values in each column of the eviction data
+data_summary_na <- evictions %>% 
+  dplyr::select(everything()) %>%
+  summarise_all(funs(sum(is.na(.)))) %>% 
+  tidyr::pivot_longer(everything(), names_to="All_variables", values_to="na_count")
+
+#"Wrangle" the eviction data
+evictions1 <- evictions %>% 
+  janitor::clean_names() %>%
+  tidyr::drop_na(latitude, latitude) %>% #there seem to be 6834 NAs 
+  dplyr::select(executed_date, residential_commercial, eviction_postcode, eviction_legal_possession, latitude, longitude, council_district, docket_number) %>% 
+  dplyr::filter(longitude<0 & latitude>0) %>% 
+  dplyr::filter(str_detect(residential_commercial, "Residential")) %>% 
+  mutate(date = as.Date(executed_date, format = '%m/%d/%Y')) %>% 
+  mutate(year = as.numeric(format(date,'%Y'))) %>% 
+  mutate(month = as.numeric(format(date,'%m')))
+
+#Do a bar chart to see how the number of evictions compare from year to year
+ggplot(evictions1, aes(x=year))+geom_bar()
+
+#Creating a dataframe for 2020 Evictions
+evictions2020 <- evictions1 %>% 
+ # dplyr::filter('2020-01-01'< date & date < '2020-12-31')
+  dplyr::filter(year == 2020)
+
+#Creating a dataframe for 2019 Evictions
+evictions2019 <- evictions1 %>% 
+  dplyr::filter(year == 2019)
+
+#make the main eviction and subset evictions dataframes spatial so I have these versions as well
+
+evictions1_spatial <- evictions1 %>% 
+  st_as_sf(., coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(6538)
+
+evictions2020_spatial <- evictions2020 %>% 
+  st_as_sf(., coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(6538)
+
+evictions2019_spatial <- evictions2019 %>% 
+  st_as_sf(., coords = c("longitude", "latitude"), crs = 4326) %>% 
+  st_transform(6538)
+
+evictions2020_sub  <- evictions2020_spatial[ny_citycouncil,] %>% 
+  st_transform(.,6538) #spatial subsetting, the number of evictions hasn't changed so all are intersecting with the boundaries
+
+evictions2019_sub  <- evictions2019_spatial[ny_citycouncil,] %>% 
+  st_transform(.,6538)
+
+#Finally, map this data to make sure all looks ok before beginning more concrete analysis:
+tmap_mode("view")
+
+#2020
+tm_shape(ny_districts) + 
+tm_polygons(col=NA, alpha = 0.5) +
+tm_shape(evictions2020_sub) +
+tm_dots(col = 'red', size = 0.01, shape = 19, title = NA, legend.show = TRUE, legend.is.portrait = TRUE, legend.z = NA)+
+tm_basemap(server = "http://tile.stamen.com/toner/{z}/{x}/{y}.png", group = NA, alpha = NA, tms = FALSE)+
+  tm_layout(title = "NYC Evictions in 2020", legend.outside = TRUE)
+
+#2019
+tm_shape(ny_districts) + 
+tm_polygons(col=NA, alpha = 0.5) +
+tm_shape(evictions2019_sub) +
+tm_dots(col = 'red', size = 0.01, shape = 19, title = NA, legend.show = TRUE, legend.is.portrait = TRUE, legend.z = NA)+
+tm_basemap(server = "http://tile.stamen.com/toner/{z}/{x}/{y}.png", group = NA, alpha = NA, tms = FALSE)+
+  tm_layout(title = "NYC Evictions in 2020", legend.outside = TRUE)
+
+
+```
+
+
+# Methods, Interpretation, and Criticality
+
+**Methods:** To answer my research question that is focused on clustering and "hostpots" of evictions, I will employ point pattern analysis and spatial autocorrelation because they will allow me to draw a wide array of conclusions about where and how evictions might concentrate in NYC in these two different time periods. My first step will be point pattern analysis. In principle, analysis of clustering takes complete spatial randomness (CSR) and the poisson distribution as a null-hypothesis/metric against which to determine if there is clustering in certain areas. I will take the following specific steps: I will first use kernal density estimations to give me a sense of where clustering of evictions may be happening, I will then move to Ripley's K to tell me if there is spatial clustering and, if so, what might be the distances away from any N point where that is happening. The "bulge" in the graph will give a rough epsilon value for DBSCAN. However, Ripley's K has several drawbacks and therefore is insufficient in-and-of-itself to determine where there is clustering. The main issue here is that Ripley's K cannot say where in geographic space clustering is happening. Also, the extent of study area can affect calculation. So, I will use DBSCAN and HDBSCAN to address this. The first takes two parametres: (1) minimum number of points to be considered a cluster, and (2) the distance between the centroid of a cluster to each point. While one value of Ripley's K is that it can help provide an epsilon value, I will also use a knee plot because it can provide us with one as well (the y axis value for where the curve spikes up). However, HDBSCAN removes the need to even specify an epsilon value and better accounts for the density of the data. So, I will use HDBSCAN to check my other work.
+
+When comparing evictions from 2020 to 2019, understanding the clustering of evictions is hard. New York City is very small so, with 16000 evictions in 2019, simply doing point pattern analysis isn't quite enough. In order to compare the two years, you would need to standardise the data. In the two maps of density that emerge, the scales are, *importantly*, not the same. Rather, they show us the concentration of evictions in particular districts. Using the same scale would not be particularly helpful because the density is still significantly larger in the 2019 data. The difference in colour (shades of red) in the 2019 data shows a greater emphasis on the darker red parts of the map. In other words, there is a greater difference in number of evictions between hot spots and cold spots.
+
+Further, I will use techniques around spatial autocorrelation to judge the relationships between spatial units. It will help identify hot/cold spots to further contextualise the point pattern analysis. Global analysis will allow us to identify spatial autocorrelation in the entire system. Local analysis will allow for a more zoomed in approach on relationships to neighbours and the global metric. For example, unlike point pattern analysis, checking for spatial autocorrelation can tell if high values are clustering with high values (Getis Ord). Of particular interest here are the z-score outputs from running  local Moran's I and the Getis Ord Gi* because the value output will ultimately tell us how significant clustering is in comparison to other reference points. The Moran's I z-score output will give the number of standard deviations away each unit (city council district here) is from the mean of a specified number of neighbours in the spatial weights matrix used. The Gi* z-score will give the number of standard deviations away from the global mean. This is significant because it will tell us not just where clusters are, but it will inherently map their relationship to a common factor. In laymens terms, for the evictions, the Local Moran's I will say if there are more or less evictions in a council district *in comparison to those in neighbouring ones.* The Gi* will tell use if there are more or less evictions in a city council district in comparison to the global average for NYC. Before running the local tests, I will look at the global ones for each dataset (2019 and 2020). These are Moran' I, Geary's C, and Getis Ord. They assess the overall nature of spatial autocorrelation in the system and so they allow us to draw conclusions about evictions in NYC overall. Thus, spatial autocorrelation will alow for comparisons between neighbourhoods (or city council districts).
+
+**Interpretation and criticality:** Before getting to Ripley's K, you need to make a window and a ppp (point pattern object). When you run the Ripley's K plot for 2020, the result is quite odd. It doesn't tell us much about where there is clustering. Similarly, the Ripley's K plot for 2019 suggests there is clustering everywhere. This might be due to the fact that there were almost 16,000 residential eviction in NYC in 2019 and the city itself is very small. So, for both cases instead, I will use a knee plot because it will help find an epsilon to use with DBSCAN. Naturally, the knee spikes at a higher y (distance) value for the 2020 dataset because there are fewer points so you would want to cast a wider net to include enough poinst to make a cluster. For the 2019 data, the knee in the chart comes at a much lower epsilon value. This makes sense because you want to narrow the criteria so not too many points are included and the whole city is one big cluster. Then, as noted before, I will use HDBSCAN as a point of comparison to account for the fact that I might not choose the best epsilon distance. This is particularly useful in the case of the 2019 data because the epsilon based on the knee chart leads to a DBSCAN output that looks quite different than the HDBSCAN output. To run the DBSCAN and HDBSCAN code, I need to make a spatial points dataframe. Now, based on the HDBSCAN for 2020, there seem to be four clusters and in 2019 there are 7. In both cases, there are clusters around Harlem/the Bronx (north of Manhattan), Brooklyn (south est of manhattan), Arverne/Edgemere (the small island south east), and Jamaica.
+
+In the spatial autocorrelation analysis, the code followed the following steps, with steps 2 onward conducted for the 2019 and 2020 datasets: (1) I create a new spatial object based on density because raw count does not work with spatial autocorrelation because it would not take into account the size of different spatial units. The unit of density is 1 metre squared, so the numbers on the legend are quite small since evictions are likely to happen at a larger scale than just an apartment. (2) calculate centroids for each polygon (3) create a neighbours list using queen's case which would acount for neighbours surrounding the spatial unit on all sides, (4) create a spatial weight matrix using row standardisation so the results are more representitive, (5) run global moran's I, global getis ord, global geary's c, (6) run the localised tests, (7) then map the z-scores of local tests.
+
+For the 2020 data, the global moran's I statistic is positive and relatively high (0.4968), suggesting there *is* spatial autocorrelation where values are clustering. Geary's C is (0.4826) which suggests that similar values clustering. The global getis ord (3.162917e-02) is greater than expected (2.000000e-02) so high values are clustering. So, globally, for evictions in 2020, high values (large numbers of evictions) are happening near similarly high values of evictions.
+
+For the 2019 data, the global moran's I statistic is positive and relatively high (0.5364), suggesting there *is* spatial autocorrelation where values are clustering. Geary's C is (0.4642) which suggests that similar values clustering. The global getis ord (3.189717e-02) is greater than expected (2.000000e-02) so high values are clustering. So, globally, for evictions in 2020, high values (large numbers of evictions) are happening near similarly high values of evictions.
+
+## Basic Point Pattern Analysis: 2020 Data
+```{r point pattern analysis of 2020 data}
+#All point pattern analysis requires a window
+window <- as.owin(ny_citycouncil)
+plot(window)
+
+#In order to do Ripley's K, you need a ppp object. But first you need a sp object to make that.
+evictions2020_sp_obj <- evictions2020_sub %>%
+  as(., 'Spatial')
+
+#make a ppp
+evictions2020.ppp <- ppp(x=evictions2020_sp_obj@coords[,1], y=evictions2020_sp_obj@coords[,2], window=window)
+
+evictions2020.ppp %>% 
+  plot(.,pch=16,cex=0.5, main="Evictions")
+
+#Kernal Density Estimate
+evictions2020.ppp %>% 
+  density(., sigma=500) %>% 
+  plot()
+
+#Ripley's K 
+K <- evictions2020.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+
+#Knee Plot
+evictions2020_points <- evictions2020_sp_obj %>%
+  coordinates(.)%>%
+  as.data.frame()
+
+evictions2020_points %>% 
+  dbscan::kNNdistplot(.,k=3)
+
+#DBSCAN
+db <- evictions2020_points %>%
+  fpc::dbscan(.,eps = 1000, MinPts = 40)
+
+plot(db, evictions2020_points, main = "DBSCAN Output", frame = F)
+plot(ny_districts$geometry, add=T)
+
+#HDBSCAN
+evictions2020_points %>% 
+  dbscan::kNNdistplot(.,k=3)
+
+hdb <- hdbscan(evictions2020_points ,minPts = 40)
+
+plot(evictions2020_points, col = hdb$cluster + 1L, cex = .5)
+plot(ny_districts$geometry, add=T)
+```
+
+## Basic Point Pattern Analysis: 2019 Data
+```{r point pattern analysis of 2019 Data}
+#spatstat, the package used for much of this, requires a ppp and in order to make this we need to first make a sp obj
+evictions2019_sp_obj <- evictions2019_sub %>%
+  as(., 'Spatial')
+
+#make a ppp
+evictions2019.ppp <- ppp(x=evictions2019_sp_obj@coords[,1], y=evictions2019_sp_obj@coords[,2], window=window)
+
+evictions2019.ppp %>% 
+  plot(.,pch=16,cex=0.5, main="Evictions")
+
+#Kernal Density Estimate
+evictions2019.ppp %>% 
+  density(., sigma=500) %>% 
+  plot()
+
+#Ripley's K 
+K <- evictions2019.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+
+#Knee Plot
+evictions2019_points <- evictions2019_sp_obj %>%
+  coordinates(.)%>%
+  as.data.frame()
+
+evictions2019_points %>% 
+  dbscan::kNNdistplot(.,k=3)
+
+#DBSCAN
+db <- evictions2019_points %>%
+  fpc::dbscan(.,eps = 500, MinPts = 100)
+
+plot(db, evictions2019_points, main = "DBSCAN Output", frame = F)
+plot(ny_districts$geometry, add=T)
+
+#HDBSCAN
+hdb <- hdbscan(evictions2019_points ,minPts = 100)
+
+plot(evictions2019_points, col = hdb$cluster + 1L, cex = .5)
+plot(ny_districts$geometry, add=T)
+```
+
+
+## Creating Density Spatial Objects for 2019 and 2020 data
+
+```{r Converting Points to Density}
+#Making a density column from the points for 2020 data
+
+ny_citycouncil2020 <- evictions1 %>% 
+  left_join(ny_citycouncil, 
+            by = c("council_district" = "coun_dist"))
+
+eviction_density_sf_joined <- ny_citycouncil %>%
+  janitor::clean_names() %>%
+  mutate(n = lengths(st_intersects(., evictions2020_sub))) %>%
+  mutate(area=st_area(.)) %>% 
+  #calculate density
+  mutate(density=(n/area))
+
+class(evictions2020_sub)
+
+eviction_density_sf_joined <- eviction_density_sf_joined  %>%                    
+  group_by(coun_dist) %>%         
+  summarise(density = first(density), council_district= first(coun_dist), eviction_count= first(n))
+
+tmap_mode("plot")
+tm_shape(eviction_density_sf_joined) +
+tm_polygons("density", 
+        style="jenks",
+        n = 5,
+        palette="YlOrRd",
+        midpoint=NA,
+        legend.hist=TRUE, legend.hist.title="Distributions of  Density of Evictions") +
+  tm_layout(title = "Density of Evictions in 2020 per City Council District", main.title.position = "center", legend.outside = TRUE)
+
+#Making a density column from the points for 2019 data
+
+eviction_density_sf_joined2019 <- ny_citycouncil %>%
+  janitor::clean_names() %>%
+  mutate(n = lengths(st_intersects(., evictions2019_sub))) %>%
+  mutate(area=st_area(.)  / 10^6) %>% 
+  #calculate density
+  mutate(density=(n/area)*(10*6))
+
+eviction_density_sf_joined2019 <- eviction_density_sf_joined2019  %>%                    
+  group_by(coun_dist) %>%         
+  summarise(density = first(density), council_district = first(coun_dist), eviction_count = first(n))
+
+tmap_mode("plot")
+tm_shape(eviction_density_sf_joined2019) +
+tm_polygons("density", 
+            style = "jenks",
+            n = 5,
+            palette = "YlOrRd",
+            midpoint = NA,
+            title = "Density of Evictions (per km²)",
+            legend.hist = TRUE, legend.hist.title = "Distributions of Density of Evictions") +
+  tm_layout(legend.outside = TRUE, 
+            frame = FALSE)  # Remove the frame
+
+# Add the title with the title function from base R
+title(main = "Density of Evictions in 2019 per City Council District", 
+      line = -1, 
+      outer = TRUE,
+      cex.main = 2)  # Increase the size of the title with cex.main
+
+```
+
+## Spatial Autocorrelation
+
+```{r Spatial Autocorrelation Analysis}
+#Spatial Autocorrelation for 2020 Data
+
+#calculate the centroids
+coordsW <- eviction_density_sf_joined %>% 
+  st_centroid() %>% 
+  st_geometry()
+
+#create a neighbours list
+council_district_nb <- eviction_density_sf_joined %>% 
+  poly2nb(., queen=T)
+
+#create a spatial weights matrix from these weights
+eviction_swm1 <- council_district_nb %>% 
+  nb2mat(.,style="W",  zero.policy=TRUE)
+
+#create a spatial weight matrix *list* because moran's I and others require that and not the matrix itself
+eviction_swm1_list <- council_district_nb %>%
+  nb2listw(., style="W",  zero.policy=TRUE)
+
+#check global moran's I to see if there is general spatial autocorrelation
+global_moran <- eviction_density_sf_joined %>%
+  pull(density) %>%
+  as.vector() %>%
+  moran.test(., eviction_swm1_list)
+
+#check global geary's c to see if similar or disimilar values are clustering
+global_geary <- eviction_density_sf_joined %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  geary.test(., eviction_swm1_list)
+
+#check global getis ord to see if similar or dissimilar values are clustering
+global_getis <- eviction_density_sf_joined %>%
+  pull(density) %>%
+  as.vector() %>%
+  globalG.test(., eviction_swm1_list)
+
+#check local moran's I
+local_moran <- eviction_density_sf_joined %>%
+  pull(density) %>%
+  as.vector() %>%
+  localmoran(., eviction_swm1_list) %>% 
+  as_tibble()
+
+#Add the local moran's I values to map them
+eviction_density_sf_joined <- eviction_density_sf_joined %>%
+  mutate(eviction_density_I_score = as.numeric(local_moran$Ii))%>%
+  mutate(eviction_density_Iz_score = as.numeric(local_moran$Z.Ii))
+
+#Map local Moran's I count: suggests that areas with high numbers of evictions neighbour other areas with high numbers of evictions
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+
+tm_shape(eviction_density_sf_joined) + tm_polygons("eviction_density_Iz_score", style="fixed", breaks=breaks1, palette="RdGy", midpoint=NA, title="Local Moran's I map 2020 Data")
+
+#Plot Local Getis Ord
+local_getis <- eviction_density_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  localG(., eviction_swm1_list)
+
+eviction_density_sf_joined <- eviction_density_sf_joined %>%
+  mutate(local_getis = as.numeric(local_getis))
+
+tm_shape(eviction_density_sf_joined) + tm_polygons("local_getis",  style="fixed", breaks=breaks1, palette="RdGy", midpoint=NA, title="Gi*, Evictions in NYC in 2020")+ tm_layout(legend.outside = TRUE)
+
+#Spatial Autocorrelation for 2019 Data
+
+#calculate the centroids
+coordsW1 <- eviction_density_sf_joined2019 %>% 
+  st_centroid() %>% 
+  st_geometry()
+
+#create a neighbours list
+council_district_nb2019 <- eviction_density_sf_joined2019 %>% 
+  poly2nb(., queen=T)
+
+#create a spatial weights matrix from these weights
+eviction_swm1_2019 <- council_district_nb2019 %>% 
+  nb2mat(.,style="W", zero.policy=TRUE)
+
+#create a spatial weight matrix *list* because moran's I and others require that and not the matrix itself
+eviction_swm1_list2019 <- council_district_nb2019 %>%
+  nb2listw(., style="W", zero.policy=TRUE)
+
+#check global moran's I to see if there is general spatial autocorrelation
+global_moran2019 <- eviction_density_sf_joined2019 %>%
+  pull(density) %>%
+  as.vector() %>%
+  moran.test(., eviction_swm1_list2019)
+
+#check global geary's c to see if similar or disimilar values are clustering
+global_geary2019 <- eviction_density_sf_joined2019 %>% 
+  pull(density) %>% 
+  as.vector() %>% 
+  geary.test(., eviction_swm1_list2019)
+
+#check global getis ord to see if high or low values are clustering
+global_getis2019 <- eviction_density_sf_joined2019 %>%
+  pull(density) %>%
+  as.vector() %>%
+  globalG.test(., eviction_swm1_list2019)
+
+#check local moran's I
+local_moran2019 <- eviction_density_sf_joined2019 %>%
+  pull(density) %>%
+  as.vector() %>%
+  localmoran(., eviction_swm1_list2019) %>% 
+  as_tibble()
+
+#Add the local moran's I values to map them
+eviction_density_sf_joined2019 <- eviction_density_sf_joined2019 %>%
+  mutate(eviction_density_I_score = as.numeric(local_moran$Ii))%>%
+  mutate(eviction_density_Iz_score =as.numeric(local_moran$Z.Ii))
+
+#Map local Moran's I count: suggests that areas with high numbers of evictions neighbour other areas with high numbers of evictions
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+
+tm_shape(eviction_density_sf_joined2019) + tm_polygons("eviction_density_Iz_score", style="fixed",  breaks=breaks1, palette="RdGy", midpoint=NA, title="Local Moran's I map 2019 data")
+
+#Plot Local Getis Ord/z-score
+local_getis2019 <- eviction_density_sf_joined2019 %>%
+  pull(density) %>%
+  as.vector()%>%
+  localG(., eviction_swm1_list2019)
+
+eviction_density_sf_joined2019 <- eviction_density_sf_joined2019 %>%
+  mutate(local_getis = as.numeric(local_getis))
+
+tm_shape(eviction_density_sf_joined2019) + tm_polygons("local_getis",  style="fixed", breaks=breaks1, palette="RdGr", midpoint=NA, title="Gi*, Evictions in NYC in 2019")+ tm_layout(legend.outside = TRUE)
+
+```
+
+# Visualisation/Mapping & Interpretation/Reflection
+
+For the visualisations, I will make two maps: one for 2020 and one for 2019. For both, I will use the Getis Ord Gi* maps from above and one general density one. These maps are by far the most compelling in terms of the stories they tell about evictions in NYC.
+
+In regard to the map on density, we can see that evictions are more densely concentrated in the city council districts associated with Harlem and the Bronx. When we compare the maps of 2019 and 2020, we can see that the densities are relatively similar although they occur at different scales (as shown in the legend).
+
+Based on the output local Moran's I and Gi star maps from the spatial autocorrelation analysis, we can draw some *holistic/general* conclusions. In both the 2020 and the 2019 data, the council districts associated with Harlem and the Bronx have the most significant rate of evictions. *The Gi star maps are identical.* Based on the moran's I map above, this is true in relation to neighbours as well as to the city as a whole. This is because both metrics produce a z score that maps the standard deviations that the values of spatial units are away from the local and global means. In other words, these specific city council districts deviate far more from the norm than other clusters of evictions. A significant difference between the map of local moran's I and Gi star is city council district 11 which is in the upper left corner of the map in red. It is the northwest bronx. It seems that, while the area as a whole experiences more evictions than the rest of the city, it experiences less than its immediate neighbours to the south. 
+
+When we compare the spatial autocorrelation results to HDBSCAN's cluster outputs, the former tells us more about the significance of those clusters since some do not appear on the moran's I or Gi star maps. Importantly, while the units of HSBSCAN differ from that used in spatial autocorrelation (points versus density), both ultimately would aim to tell us about the concentration of evictions across space. So, we would expect to see some overlap between the two types of analsysis. The one place where see overlap is in this hotspot in the bronx where both clustering and intense spatial autocorrelation are happening. So, we can draw *general* conclusions about the trends at the city council level. Once conclusion we can draw is that we cannot treat all of these clusters in the same way and make a universal statement about where evictions are happening in the city.
+```{r}
+#2020 Map
+
+tmap_mode("plot")
+
+# set the breaks
+# for our mapped data
+breaks1<-c(-1000,-2.58,-1.96,-1.65,1.65,1.96,2.58,1000)
+
+# plot each map
+tm1 <- tm_shape(eviction_density_sf_joined2019) + tm_polygons("density", style="cont", n = 5, palette="YlOrRd", midpoint=NA)+  tm_legend(show=FALSE)+ tm_layout(frame=FALSE)+ tm_credits("Density of Evictions (2019)", position=c(0,0.9), size=0.75)
+  
+tm2 <- tm_shape(eviction_density_sf_joined2019) + tm_polygons("local_getis",  style="fixed", breaks=breaks1, palette="RdGy", midpoint=NA)+  tm_legend(show=FALSE)+ tm_layout(frame=FALSE)+ tm_credits("Gi* Density (2019)", position=c(0,0.9), size=0.75)
+
+legend1 <- tm_shape(eviction_density_sf_joined2019) + tm_polygons("density", style="cont", n = 5, palette="YlOrRd", midpoint=NA) +
+    tm_scale_bar(position=c(0.5,0.5), text.size=0.6)+
+    tm_compass(north=0, position=c(0.65,0.7))+
+    tm_layout(legend.only = TRUE, legend.position=c(0.2,0.6),asp=0.1)+
+    tm_credits("This map shows the density of evictions  in each NYC city council district", position=c(0.0,0.4))
+
+legend2 <- tm_shape(eviction_density_sf_joined2019) + tm_polygons("local_getis", style="cont", n = 5, palette="RdGy", midpoint=NA) +
+    tm_scale_bar(position=c(0.5,0.5), text.size=0.6)+
+    tm_compass(north=0, position=c(0.65,0.7))+
+    tm_layout(legend.only = TRUE, legend.position=c(0.2,0.5),asp=0.1)+
+    tm_credits("This map shows the proportion of evictions in relation to the citywide average", position=c(0,0.4))
+  
+  
+t2019 = tmap_arrange(tm1, tm2, legend1, legend2, ncol=2)
+
+t2019
+
+#2020
+# plot each map
+tm3 <- tm_shape(eviction_density_sf_joined) + tm_polygons("density", style="cont", n = 5, palette="YlOrRd", midpoint=NA)+  tm_legend(show=FALSE)+ tm_layout(frame=FALSE)+ tm_credits("Density of Evictions (2020)", position=c(0,0.9), size=0.75)
+  
+tm4 <- tm_shape(eviction_density_sf_joined) + tm_polygons("local_getis",  style="fixed", breaks=breaks1, palette="RdGy", midpoint=NA)+  tm_legend(show=FALSE)+ tm_layout(frame=FALSE)+ tm_credits("Gi* Density (2020)", position=c(0,0.9), size=0.75)
+
+legend3 <- tm_shape(eviction_density_sf_joined) + tm_polygons("density", style="cont", n = 5, palette="YlOrRd", midpoint=NA) +
+    tm_scale_bar(position=c(0.5,0.5), text.size=0.6)+
+    tm_compass(north=0, position=c(0.65,0.7))+
+    tm_layout(legend.only = TRUE, legend.position=c(0.2,0.6),asp=0.1)+
+    tm_credits("This map shows the density of evictions  in each NYC city council district", position=c(0.0,0.4))
+
+legend4 <- tm_shape(eviction_density_sf_joined) + tm_polygons("local_getis", style="cont", n = 5, palette="RdGy", midpoint=NA) +
+    tm_scale_bar(position=c(0.5,0.5), text.size=0.6)+
+    tm_compass(north=0, position=c(0.65,0.7))+
+    tm_layout(legend.only = TRUE, legend.position=c(0.2,0.5),asp=0.1)+
+    tm_credits("This map shows the proportion of evictions in relation to the citywide average", position=c(0,0.4))
+  
+  
+t2020 = tmap_arrange(tm3, tm4, legend3, legend4, ncol=2)
+t2020
+
+#Here is a cartogram of evictions in 2019 (just for practice)
+evict_cartogram <- cartogram_cont(eviction_density_sf_joined2019, "eviction_count", itermax = 7)
+ggplot() + geom_sf(data = evict_cartogram, aes(fill = eviction_count))
+
+# Create cartogram of evictions in 2020
+evict_cartogram <- cartogram_cont(eviction_density_sf_joined, "eviction_count", itermax = 7)
+
+# Plot the cartogram with aesthetic enhancements
+ggplot() + 
+  geom_sf(data = evict_cartogram, aes(fill = eviction_count)) +
+  
+  # Use a yellow-to-dark red color palette
+  scale_fill_gradient2(low = "yellow", mid = "orange", high = "red", midpoint = median(evict_cartogram$eviction_count),
+                       guide = guide_colorbar(title = "Eviction Count", 
+                                              title.position = "top", 
+                                              title.theme = element_text(face = "bold", size = 10))) +
+  
+  # Add title and labels
+  labs(title = "Cartogram of New York City Evictions in 2020") +
+  
+  # Improve the theme
+  theme_void() + # This removes the background
+  theme(plot.title = element_text(hjust = 0.5, face="bold", size=14, color="black"),  # Adjust color and size to fit the theme_void
+        plot.caption = element_text(hjust = 1, size=10, color="black"))  # Adjust color and size to fit the theme_void
+
+
+```
+
+
+
+# Further Visualisations
+For my statistical charts, I will a barchart showing the count of evictions per month in 2019 and 2020. For the code to do so, I will first create a new dataframe based on the year and month from the initial cleaned eviction dataframe. I will use this to make the bar chart of evictions each month for the year. This will entail group_by() and summarise() and filtering just for 2020. From this new dataframe, I will convert the numeric date format to a month abbreviation and change them to factor so I can chart them in an ordered way on the barchart.
+
+I chose this format because it is has the most real world relevance. It will show if, perhaps, there are more evictions in certain seasons. People who are evicted would then have to deal with bad weather if they're made homeless in the winter.
+
+```{r}
+#Histogram/charts
+mymonths <-c("Jan","Feb","Mar", "Apr","May","Jun", "Jul","Aug","Sep", "Oct","Nov","Dec")
+
+#make new df for bar plot and clean the data: 2019
+evictions_hist2019 <- evictions1 %>% 
+  group_by(year, month) %>%
+  summarise(count=n()) %>% 
+  filter(year==2019)
+
+evictions_hist2019$MonthAbb <- mymonths[evictions_hist2019$month]
+evictions_hist2019$MonthAbb <- factor(evictions_hist2019$MonthAbb,levels = c("Jan","Feb","Mar", "Apr","May","Jun", "Jul","Aug","Sep", "Oct","Nov","Dec"))
+
+#make new df for bar plot and clean the data: 2019
+evictions_hist2020 <- evictions1 %>% 
+  group_by(year, month) %>%
+  summarise(count=n()) %>% 
+  filter(year==2020) 
+
+evictions_hist2020$MonthAbb <- mymonths[evictions_hist2020$month]
+evictions_hist2020$MonthAbb <- factor(evictions_hist2020$MonthAbb,levels = c("Jan","Feb","Mar","Nov","Dec"))
+
+#barplot by month 2019
+ggbar2019 <- ggplot(evictions_hist2019, aes(x=MonthAbb, y=count)) + 
+  geom_col(width = 0.5)+ labs(title="Ggplot2 barplot of Evictions by City Council District", x="Month", y="Count of Evictions")
+ggbar2019
+
+#barplot by month 2020
+ggbar2020 <- ggplot(evictions_hist2020, aes(x=MonthAbb, y=count)) + 
+  geom_col(width = 0.5)+ labs(title="Ggplot2 barplot of Evictions by City Council District", x="Month", y="Count of Evictions")
+ggbar2020
+
+evictions_month <- evictions1_spatial %>% 
+  group_by(year, month, date) %>% 
+  summarise(count=n())
+
+Line_Plot <- evictions_month %>%
+  ggplot( aes(x=date, y=count)) +
+    geom_area(fill="#69b3a2", alpha=0.5) +
+    geom_line(color="#69b3a2") +
+    ylab("Number of Evictions Over Time") +
+    theme_ipsum()
+Line_Plot
+
+plot2 <- ggplot(evictions_month, aes(x=date, y=count)) +
+  geom_line() + 
+  xlab("")
+plot2
+
+```
+
+# Reflections
+
+The data, which spans from 2017-2022, illustrates a complex history of evictions in NYC. The focus on 2020 as a starting point for analysis might, in part, be flawed. If we look at evictions in 2020, we can see that eviction more or less entirely stop after the covid pandemic hits in March when the city enacts its eviction moratorium. So, the data on evictions for 2019 might be better associated with the trends in 2019 as opposed to being associated with the year covid began. Perhaps a more fruitful analysis might have looked at data in 2021 and 2022 to see how they compare to 2019. This would hopefully tell us how post covid hotspots relate to pre covid hotspots. 
+
+In general, though, the methods I used were appropriate for answering the question. They have allowed us to explore the question from many angles which are touched upon in the visualisation section above. Yet, there were some limitations in my methods. One issue I encountered was attempting to standardise the density for both the 2019 and 2020 maps.
+
+Of course, one issue with this data and the community council districts is that they have been subject to a degree of gerrymandering (https://www.brennancenter.org/our-work/research-reports/what-went-wrong-new-yorks-redistricting) since the process of drawing voting boundaries in NYC is complicated and vauge. The maps of the city council districts gives us a peak into this: the layout of the districts where evictions are concentrated have somewhat haphazard boundaries.
+
+One of the issues with using polygons like the community council districts is that they might not take into account how community boundaries have naturally formed. In other words, people in city council districts might - in reality - associate themselves with different neighbourhoods. Perhaps a local determination of boundaries from community stakeholders would be a better way to organise the map when approaching spatial autocorrelation. So, in other words, the boundaries of the shapefile might not be representative of reality.
+
+Ultimately, the results from my analysis allow me to reject the null hypothesis of complete spatial randomness. *Instead, my results demonstrate that evictions cluster in specific parts of the city (see the maps above). Thesea areas are Harlem/the Bronx (north of Manhattan), Brooklyn (south est of Manhattan), Arverne/Edgemere (the small island south east), and Jamaica (part of Queens). Further, evictions - when thought of in terms of density per area - cluster to a more extreme degree in Harlem and the Bronx. Further, in comparison to 2019, there are far fewer evictions in 2020. This, however, can be explained by the moratorium as discussed above.* 
+
+Future research could go in many directions. One way to improve this would would be to look at specific dates to see how they impact evictions. One might be the official end of the eviction moratorium on 15 Jan 2022 (https://www.nyc.gov/site/finance/sheriff-courts/sheriff-evictions.page#:~:text=These%20provisions%20extended%20the%20eviction,Harbor%20Act%20(%22TSHA%22). Generally speaking, comparaitve research based on certain constants would be a good approach.Further, I could look at the different marshals that are involved in the eviction process to see if some might work more than others. 
+
+The results of this analysis are useful for a variety of reasons. They might help policy makers decide where to divert resources and funds for social services. Knowing that the Bronx is disproportionately targeted by eviction, government could support residents there more concretely. This research could also be useful for community activits to go to their specific representitve with evidence that their city council district has disproportionately been the target of evictions and thus they need more tenant protections to be put in place. There are just some of many directions that future research could go and how it could be useful. But, ultimately, the opportunities for social change are many.
+
+
